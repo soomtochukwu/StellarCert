@@ -1,4 +1,5 @@
 import { Navigate, Outlet } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 
 // Define allowed routes based on user roles
 const roleRoutes: Record<string, string[]> = {
@@ -15,13 +16,10 @@ interface ProtectedRouteProps {
 
 const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ allowedRoles }) => {
   const currentPath: string = window.location.pathname;
+  const { user } = useAuth();
 
   // Allow public access to /verify
   if (currentPath === "/verify") return <Outlet />;
-
-  // Retrieve user data from localStorage
-  const userData = localStorage.getItem("user");
-  const user = userData ? JSON.parse(userData) : null;
 
   // If no user is logged in, redirect to login page
   if (!user) return <Navigate to="/login" replace />;

@@ -45,8 +45,23 @@ export class CertificateController {
     @Query('limit') limit = 10,
     @Query('issuerId') issuerId?: string,
     @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
   ) {
-    return this.certificateService.findAll(page, limit, issuerId, status);
+    return this.certificateService.findAll(
+      page,
+      limit,
+      issuerId,
+      status,
+      search,
+      sortBy,
+      sortOrder,
+      startDate,
+      endDate,
+    );
   }
 
   @Get('stats/summary')

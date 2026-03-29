@@ -1,226 +1,293 @@
-import { useEffect, useState } from 'react';
-import { Wallet, Download, Eye, Clock, QrCode, X, AlertCircle, Share2, Check } from 'lucide-react';
-import { Certificate, getUserCertificates, certificateApi, getCertificatePdfUrl } from '../api';
+import React, { useCallback, useEffect, useState } from "react";
+import { useAuth } from "../context/AuthContext";
+import { getCertificatePdfUrl, getUserCertificates } from "../api";
+import QRCodeModal from "../components/QRCodeModal";
+import {
+  Wallet,
+  Download,
+  Eye,
+  Clock,
+  QrCode,
+  Share2,
+  Check,
+} from "lucide-react";
 
-const CertificateWallet = () => {
-  const [certificates, setCertificates] = useState<Certificate[]>([]);
-  const [loading, setLoading] = useState(true);
+interface CertShape {
+  id: string;
+  title: string;
+  recipientName?: string;
+  issueDate?: string;
+  expiryDate?: string;
+  status?: "active" | "expired" | "revoked" | "frozen";
+  serialNumber?: string;
+  pdfUrl?: string;
+}
 
-  // ✅ QR states
-  const [qrCodes, setQrCodes] = useState<Record<string, string>>({});
-  const [selectedQR, setSelectedQR] = useState<string | null>(null);
-  const [loadingQR, setLoadingQR] = useState<Record<string, boolean>>({});
-
+const CertificateWallet: React.FC = () => {
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const [certificates, setCertificates] = useState<CertShape[]>([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<
+    "all" | "active" | "expired" | "revoked" | "frozen"
+  >("all");
+  const [qrModal, setQrModal] = useState<{
+    isOpen: boolean;
+    certificateId?: string | null;
+    certificateName?: string | null;
+  }>({ isOpen: false, certificateId: null, certificateName: null });
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  useEffect(() => {
-    const user = localStorage.getItem('user');
-
-    if (!user) {
-      setLoading(false);
+  const fetchCertificates = useCallback(async () => {
+    if (!user?.id) {
       return;
     }
 
-    const parsedUser = JSON.parse(user);
-
-    const fetchCertificates = async () => {
-      try {
-        const data = await getUserCertificates(parsedUser.id);
-        if (data) setCertificates(data);
-      } catch (error) {
-        console.error('Error fetching certificates:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchCertificates();
-  }, []);
-
-  // ✅ QR CODE LOGIC
-  const fetchQRCode = async (certificateId: string) => {
-    if (qrCodes[certificateId]) return qrCodes[certificateId];
-
-    setLoadingQR(prev => ({ ...prev, [certificateId]: true }));
-
+    setLoading(true);
+    setError(null);
     try {
-      const qrCode = await certificateApi.getQR(certificateId);
-      setQrCodes(prev => ({ ...prev, [certificateId]: qrCode }));
-      return qrCode;
-    } catch (error) {
-      console.error('Error fetching QR code:', error);
-      return null;
+      const data = await getUserCertificates(user.id);
+      setCertificates(data);
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error ? err.message : "Failed to load certificates",
+      );
     } finally {
-      setLoadingQR(prev => ({ ...prev, [certificateId]: false }));
+      setLoading(false);
     }
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      void fetchCertificates();
+    }
+  }, [isAuthenticated, fetchCertificates]);
+
+  const filtered =
+    filter === "all"
+      ? certificates
+      : certificates.filter((certificate) => certificate.status === filter);
+
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-12 w-12 animate-spin rounded-full border-b-2 border-blue-600" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="text-center">
+          <h2 className="mb-2 text-2xl font-bold text-gray-800">
+            Authentication Required
+          </h2>
+          <p className="text-gray-600">
+            Please log in to view your certificate wallet.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const handleShowQR = (certificateId: string, certificateName?: string) => {
+    setQrModal({
+      isOpen: true,
+      certificateId,
+      certificateName: certificateName || "Certificate",
+    });
   };
 
-  const handleShowQR = async (certificateId: string) => {
-    const qrCode = await fetchQRCode(certificateId);
-    if (qrCode) setSelectedQR(qrCode);
-  };
-
-  // ✅ SHARE LOGIC
-  const handleShare = async (cert: Certificate) => {
-    const serial = cert.serialNumber || cert.id;
+  const handleShare = async (certificate: CertShape) => {
+    const serial = certificate.serialNumber || certificate.id;
     const url = `${window.location.origin}/verify?serial=${encodeURIComponent(serial)}`;
 
     const copyToClipboard = async () => {
       await navigator.clipboard.writeText(url);
-      setCopiedId(cert.id);
+      setCopiedId(certificate.id);
       setTimeout(() => setCopiedId(null), 2000);
     };
 
     if (navigator.share) {
       try {
         await navigator.share({
-          title: cert.title,
-          text: `Check out my certificate: ${cert.title} — awarded to ${cert.recipientName}`,
+          title: certificate.title,
+          text: `Check out my certificate: ${certificate.title}`,
           url,
         });
       } catch (err) {
-        if (err instanceof Error && err.name !== 'AbortError') {
+        if (err instanceof Error && err.name !== "AbortError") {
           await copyToClipboard();
         }
       }
-    } else {
-      await copyToClipboard();
+      return;
     }
+
+    await copyToClipboard();
   };
 
-  // ✅ PDF VIEW/DOWNLOAD LOGIC
-  const handlePdfAction = async (cert: Certificate, action: 'view' | 'download') => {
+  const handlePdfAction = async (
+    certificate: CertShape,
+    action: "view" | "download",
+  ) => {
     setError(null);
-    setActionLoadingId(cert.id);
-
+    setActionLoadingId(certificate.id);
     try {
-      let url: string | undefined | null = cert.pdfUrl;
-
+      const url = certificate.pdfUrl || (await getCertificatePdfUrl(certificate.id));
       if (!url) {
-        url = await getCertificatePdfUrl(cert.id);
+        throw new Error("PDF not found");
       }
 
-      if (!url) throw new Error('PDF not found');
-
-      if (action === 'view') {
-        window.open(url, '_blank', 'noopener,noreferrer');
-      } else {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error('PDF unavailable');
-
-        const blob = await res.blob();
-        const objectUrl = window.URL.createObjectURL(blob);
-
-        const a = document.createElement('a');
-        a.href = objectUrl;
-        a.download = `Certificate-${cert.serialNumber || cert.id}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-
-        setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
+      if (action === "view") {
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
       }
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error("PDF unavailable");
+      }
+
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `Certificate-${certificate.serialNumber || certificate.id}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
     } catch (err: unknown) {
-      console.error(err);
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      setError(`Failed to ${action} certificate "${cert.title}". ${message}`);
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(`Failed to ${action} certificate "${certificate.title}". ${message}`);
     } finally {
       setActionLoadingId(null);
     }
   };
 
   return (
-    <div className="max-w-7xl mx-auto">
-      <div className="flex items-center gap-4 mb-8">
-        <Wallet className="w-10 h-10 text-blue-600" />
-        <h1 className="text-3xl font-bold">Certificate Wallet</h1>
+    <div className="mx-auto max-w-6xl px-4 py-8">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900">Certificate Wallet</h1>
+        <p className="mt-1 text-gray-600">
+          Welcome, {user?.firstName || user?.email}
+        </p>
       </div>
 
-      {error && (
-        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3 text-red-700">
-          <AlertCircle className="w-5 h-5 mt-0.5" />
-          <p>{error}</p>
+      <div className="mb-6 flex w-fit space-x-1 rounded-lg bg-gray-100 p-1">
+        {(["all", "active", "expired", "revoked", "frozen"] as const).map(
+          (value) => (
+            <button
+              key={value}
+              onClick={() => setFilter(value)}
+              className={`rounded-md px-4 py-2 text-sm font-medium capitalize transition-colors ${
+                filter === value
+                  ? "bg-white text-blue-600 shadow"
+                  : "text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              {value}
+            </button>
+          ),
+        )}
+      </div>
+
+      {loading && (
+        <div className="py-12 text-center">
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-b-2 border-blue-600" />
         </div>
       )}
 
-      {loading ? (
-        <div className="text-center py-12">
-          <div className="animate-spin h-12 w-12 border-b-2 border-blue-600 rounded-full mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading certificates...</p>
+      {error && (
+        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4">
+          <p className="text-red-700">{error}</p>
+          <button
+            onClick={() => void fetchCertificates()}
+            className="mt-2 text-sm text-red-600 underline"
+          >
+            Retry
+          </button>
         </div>
-      ) : certificates.length === 0 ? (
-        <div className="text-center py-12 bg-white rounded-lg shadow-md">
-          <Wallet className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-gray-600">No Certificates Yet</h2>
-          <p className="text-gray-500 mt-2">Your earned certificates will appear here</p>
+      )}
+
+      {!loading && filtered.length === 0 ? (
+        <div className="rounded-lg bg-white py-12 text-center shadow-md">
+          <Wallet className="mx-auto mb-4 h-16 w-16 text-gray-400" />
+          <h2 className="text-xl font-semibold text-gray-600">
+            No Certificates Yet
+          </h2>
+          <p className="mt-2 text-gray-500">
+            Your earned certificates will appear here
+          </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {certificates.map(cert => (
-            <div key={cert.id} className="bg-white rounded-lg shadow-md p-6">
-              <div className="flex justify-between mb-4">
-                <h3 className="text-xl font-semibold">{cert.title}</h3>
-                <span className={`px-2 py-1 text-sm rounded ${
-                  cert.status === 'active'
-                    ? 'bg-green-100 text-green-800'
-                    : 'bg-red-100 text-red-800'
-                }`}>
-                  {cert.status}
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {filtered.map((certificate) => (
+            <div
+              key={certificate.id}
+              className="rounded-lg bg-white p-6 shadow-md"
+            >
+              <div className="mb-4 flex justify-between">
+                <h3 className="text-xl font-semibold">{certificate.title}</h3>
+                <span
+                  className={`rounded px-2 py-1 text-sm ${
+                    certificate.status === "active"
+                      ? "bg-green-100 text-green-800"
+                      : "bg-red-100 text-red-800"
+                  }`}
+                >
+                  {certificate.status}
                 </span>
               </div>
 
               <div className="mb-6 space-y-2 text-gray-600">
-                <p>Issued to: {cert.recipientName}</p>
-                <p className="flex items-center gap-2">
-                  <Clock className="w-4 h-4" />
-                  {new Date(cert.issueDate).toLocaleDateString()}
-                </p>
+                {certificate.recipientName && (
+                  <p>Issued to: {certificate.recipientName}</p>
+                )}
+                {certificate.issueDate && (
+                  <p className="flex items-center gap-2">
+                    <Clock className="h-4 w-4" />
+                    {new Date(certificate.issueDate).toLocaleDateString()}
+                  </p>
+                )}
               </div>
 
               <div className="flex justify-between">
                 <button
-                  onClick={() => handlePdfAction(cert, 'view')}
-                  disabled={actionLoadingId === cert.id}
+                  onClick={() => void handlePdfAction(certificate, "view")}
+                  disabled={actionLoadingId === certificate.id}
                   className="flex items-center gap-2 text-blue-600 disabled:opacity-50"
                 >
-                  <Eye className="w-4 h-4" />
-                  View
+                  <Eye className="h-4 w-4" /> View
                 </button>
 
                 <button
-                  onClick={() => handleShowQR(cert.id)}
-                  disabled={loadingQR[cert.id]}
-                  className="flex items-center gap-2 text-purple-600 disabled:opacity-50"
+                  onClick={() => handleShowQR(certificate.id, certificate.title)}
+                  className="flex items-center gap-2 text-purple-600"
                 >
-                  {loadingQR[cert.id] ? (
-                    <div className="animate-spin h-4 w-4 border-b-2 border-purple-600 rounded-full"></div>
-                  ) : (
-                    <QrCode className="w-4 h-4" />
-                  )}
-                  QR
+                  <QrCode className="h-4 w-4" /> QR
                 </button>
 
                 <button
-                  onClick={() => handlePdfAction(cert, 'download')}
-                  disabled={actionLoadingId === cert.id}
+                  onClick={() => void handlePdfAction(certificate, "download")}
+                  disabled={actionLoadingId === certificate.id}
                   className="flex items-center gap-2 text-green-600 disabled:opacity-50"
                 >
-                  <Download className="w-4 h-4" />
-                  Download
+                  <Download className="h-4 w-4" /> Download
                 </button>
 
                 <button
-                  onClick={() => handleShare(cert)}
+                  onClick={() => void handleShare(certificate)}
                   className="flex items-center gap-2 text-indigo-600"
                 >
-                  {copiedId === cert.id ? (
-                    <Check className="w-4 h-4" />
+                  {copiedId === certificate.id ? (
+                    <Check className="h-4 w-4" />
                   ) : (
-                    <Share2 className="w-4 h-4" />
+                    <Share2 className="h-4 w-4" />
                   )}
-                  {copiedId === cert.id ? 'Copied!' : 'Share'}
+                  {copiedId === certificate.id ? "Copied!" : "Share"}
                 </button>
               </div>
             </div>
@@ -228,24 +295,12 @@ const CertificateWallet = () => {
         </div>
       )}
 
-      {/* ✅ QR MODAL */}
-      {selectedQR && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white p-6 rounded-lg max-w-sm w-full">
-            <div className="flex justify-between mb-4">
-              <h3 className="font-semibold">Certificate QR Code</h3>
-              <button onClick={() => setSelectedQR(null)}>
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <img src={selectedQR} className="mx-auto max-h-[300px]" />
-            <p className="text-sm text-gray-600 text-center mt-4">
-              Scan to verify certificate
-            </p>
-          </div>
-        </div>
-      )}
+      <QRCodeModal
+        isOpen={!!qrModal.isOpen}
+        onClose={() => setQrModal({ isOpen: false, certificateId: null })}
+        certificateId={qrModal.certificateId ?? ""}
+        certificateName={qrModal.certificateName ?? "Certificate"}
+      />
     </div>
   );
 };

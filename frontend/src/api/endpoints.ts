@@ -21,11 +21,17 @@ import {
   TotalActiveUsersStats,
   IssuerStats,
   PaginatedActivityLog,
+  AdminAnalytics,
+  AuditLogItem,
+  AuditStatistics,
 } from "./types";
 import { tokenStorage } from "./tokens";
 
-// Configuration flag - set to true to use dummy data
-let USE_DUMMY_DATA = true;
+// Configuration flag - can be enabled via Vite env `VITE_USE_DUMMY_DATA` ("true"/"false").
+const VITE_USE_DUMMY = (
+  import.meta as unknown as { env: Record<string, string> }
+).env?.VITE_USE_DUMMY_DATA;
+let USE_DUMMY_DATA = VITE_USE_DUMMY ? VITE_USE_DUMMY === "true" : false;
 const API_URL_BASE =
   (import.meta as unknown as { env: Record<string, string> }).env
     ?.VITE_API_URL || "http://localhost:3000/api/v1";
@@ -107,6 +113,31 @@ export async function apiClient<T>(
     throw apiError;
   }
 }
+
+type BackendCertificate = Partial<Certificate> & {
+  issuedAt?: string;
+  expiresAt?: string;
+  verificationCode?: string;
+  issuer?: {
+    name?: string;
+  };
+};
+
+const normalizeCertificate = (certificate: BackendCertificate): Certificate => ({
+  ...certificate,
+  id: certificate.id ?? "",
+  serialNumber:
+    certificate.serialNumber ?? certificate.verificationCode ?? certificate.id ?? "",
+  recipientName: certificate.recipientName ?? "",
+  recipientEmail: certificate.recipientEmail ?? "",
+  title: certificate.title ?? "",
+  courseName: certificate.courseName ?? "",
+  issuerName:
+    certificate.issuerName ?? certificate.issuer?.name ?? "Unknown Issuer",
+  issueDate: certificate.issueDate ?? certificate.issuedAt ?? new Date().toISOString(),
+  expiryDate: certificate.expiryDate ?? certificate.expiresAt,
+  status: (certificate.status ?? "active") as Certificate["status"],
+});
 
 // Dummy data generators
 const dummyData = {
@@ -195,6 +226,12 @@ export const userApi = {
   getProfile: async (): Promise<User> => {
     return apiClient<User>("/users/profile");
   },
+  updateProfile: async (data: ProfileUpdateData): Promise<User> => {
+    return apiClient<User>("/users/profile", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
   getByEmail: fetchUserByEmail,
   listAll: async (
     params?: Record<string, string | number | boolean>,
@@ -209,6 +246,28 @@ export const userApi = {
       `/users?${searchParams.toString()}`,
     );
   },
+  getAll: async (params?: Record<string, string | number | boolean>) => {
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        searchParams.set(key, String(value));
+      });
+    }
+    return apiClient<PaginatedResponse<User>>(`/users?${searchParams.toString()}`);
+  },
+  getById: async (id: string) => apiClient<User>(`/users/${id}`),
+  updateRole: async (id: string, role: string) =>
+    apiClient<User>(`/users/${id}/role`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  toggleStatus: async (id: string, isActive: boolean) =>
+    apiClient<User>(`/users/${id}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ isActive }),
+    }),
+  delete: async (id: string) =>
+    apiClient<void>(`/users/${id}`, { method: "DELETE" }),
 };
 
 // ==================== TEMPLATE MANAGEMENT ====================
@@ -230,6 +289,10 @@ export const fetchDefaultTemplate = async (): Promise<CertificateTemplate> => {
 
 export const templateApi = {
   list: async (): Promise<CertificateTemplate[]> => {
+    if (USE_DUMMY_DATA) {
+      await simulateDelay();
+      return dummyData.templates;
+    }
     return apiClient<CertificateTemplate[]>("/templates");
   },
   getDefaultTemplate: fetchDefaultTemplate,
@@ -271,9 +334,12 @@ export const verifyCertificate = async (
   }
 
   try {
-    return await apiClient<VerificationResult>(
+    const result = await apiClient<VerificationResult>(
       `/certificates/${serialNumber}/verify`,
     );
+    return result.certificate
+      ? { ...result, certificate: normalizeCertificate(result.certificate) }
+      : result;
   } catch (error) {
     return handleError(error, "verifyCertificate");
   }
@@ -392,7 +458,10 @@ export const getUserCertificates = async (
   }
 
   try {
-    return await apiClient<Certificate[]>(`/certificates/user/${userId}`);
+    const certificates = await apiClient<BackendCertificate[]>(
+      `/certificates/user/${userId}`,
+    );
+    return certificates.map(normalizeCertificate);
   } catch (error) {
     return handleError(error, "getUserCertificates");
   }
@@ -436,15 +505,34 @@ export const certificateApi = {
         }
       });
     }
-    return apiClient<PaginatedResponse<Certificate>>(
-      `/certificates?${searchParams.toString()}`,
-    );
+    const response = await apiClient<
+      PaginatedResponse<BackendCertificate> | { certificates: BackendCertificate[]; total: number }
+    >(`/certificates?${searchParams.toString()}`);
+
+    if ("data" in response) {
+      return {
+        ...response,
+        data: response.data.map(normalizeCertificate),
+      };
+    }
+
+    const page = params?.page ?? 1;
+    const limit = params?.limit ?? 10;
+
+    return {
+      data: response.certificates.map(normalizeCertificate),
+      total: response.total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(response.total / limit)),
+    };
   },
   create: createCertificate,
   verify: verifyCertificate,
   revoke: revokeCertificate,
   getById: async (id: string): Promise<Certificate> => {
-    return apiClient<Certificate>(`/certificates/${id}`);
+    const certificate = await apiClient<BackendCertificate>(`/certificates/${id}`);
+    return normalizeCertificate(certificate);
   },
   getUserCertificates,
   bulkExport: async (
@@ -572,7 +660,7 @@ export const certificateApi = {
         "Content-Type": "application/json",
         Authorization: `Bearer ${tokenStorage.getAccessToken()}`,
       },
-      body: JSON.stringify({ filters }),
+      body: JSON.stringify(filters ?? {}),
     });
     if (!response.ok) {
       throw new Error("Export failed");
@@ -620,7 +708,7 @@ export const certificateApi = {
       throw new Error("Certificate not found");
     }
     return apiClient<Certificate>(`/certificates/${certificateId}/freeze`, {
-      method: "POST",
+      method: "PATCH",
       body: JSON.stringify({ reason, durationDays }),
     });
   },
@@ -638,10 +726,33 @@ export const certificateApi = {
       throw new Error("Certificate not found");
     }
     return apiClient<Certificate>(`/certificates/${certificateId}/unfreeze`, {
-      method: "POST",
+      method: "PATCH",
     });
   },
   getQR: getCertificateQR,
+  transfer: {
+    initiate: async (data: any): Promise<any> => {
+      return apiClient("/certificates/transfers/initiate", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    approve: async (data: any): Promise<any> => {
+      return apiClient("/certificates/transfers/approve", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    reject: async (data: any): Promise<any> => {
+      return apiClient("/certificates/transfers/reject", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    getPending: async (): Promise<any[]> => {
+      return apiClient("/certificates/transfers/pending");
+    },
+  },
 };
 
 // ==================== AUTHENTICATION ====================
@@ -724,6 +835,18 @@ export const authApi = {
     } finally {
       tokenStorage.clearTokens();
     }
+  },
+  forgotPassword: async (data: any): Promise<{ message: string }> => {
+    return apiClient("/users/forgot-password", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+  resetPassword: async (data: any): Promise<{ message: string }> => {
+    return apiClient("/users/reset-password", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
   },
 };
 
@@ -1038,5 +1161,181 @@ export const issuerProfileApi = {
     }
 
     return response.json();
+  },
+};
+
+export const dashboardApi = {
+  getStats: async (): Promise<DashboardStats> => {
+    if (USE_DUMMY_DATA) {
+      await simulateDelay();
+      return {
+        totalCertificates: 1250,
+        activeCertificates: 1200,
+        revokedCertificates: 30,
+        expiredCertificates: 20,
+        issuanceTrend: [
+          { date: "2023-01", count: 100 },
+          { date: "2023-02", count: 120 },
+          { date: "2023-03", count: 150 },
+        ],
+        totalVerifications: 450,
+        verifications24h: 15,
+        totalUsers: 1150,
+        statusDistribution: {
+          active: 1200,
+          revoked: 30,
+          expired: 20,
+        },
+        recentActivity: [
+          {
+            type: "issue",
+            date: new Date().toISOString(),
+            description: "Issued certificate 'Blockchain Expert' to John Doe",
+          },
+        ],
+      };
+    }
+    return apiClient<DashboardStats>("/admin/analytics/dashboard");
+  },
+
+  getRecentActivity: async (limit = 10): Promise<ActivityItem[]> => {
+    if (USE_DUMMY_DATA) {
+      await simulateDelay();
+      return [
+        {
+          type: "issue",
+          date: new Date().toISOString(),
+          description: "Issued certificate 'Blockchain Expert' to John Doe",
+        },
+      ];
+    }
+    return apiClient<ActivityItem[]>(`/admin/analytics/activity?limit=${limit}`);
+  },
+};
+
+export const auditApi = {
+  getLogs: async (params?: any): Promise<PaginatedActivityLog> => {
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value) searchParams.append(key, String(value));
+      });
+    }
+    const response = await apiClient<{ data: AuditLogItem[]; total: number }>(
+      `/audit/logs?${searchParams.toString()}`,
+    );
+    return {
+      activities: response.data,
+      meta: {
+        total: response.total,
+        page: 1,
+        limit: response.data.length,
+        totalPages: 1,
+      },
+    };
+  },
+  searchLogs: async (
+    params?: Record<string, string | number | boolean | undefined>,
+  ): Promise<{ data: AuditLogItem[]; total: number }> => {
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== "") {
+          searchParams.append(key, String(value));
+        }
+      });
+    }
+    return apiClient<{ data: AuditLogItem[]; total: number }>(
+      `/audit/logs?${searchParams.toString()}`,
+    );
+  },
+  getStatistics: async (
+    params?: Record<string, string | number | boolean | undefined>,
+  ): Promise<AuditStatistics> => {
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== "") {
+          searchParams.append(key, String(value));
+        }
+      });
+    }
+    return apiClient<AuditStatistics>(`/audit/statistics?${searchParams.toString()}`);
+  },
+  exportCsvUrl: (
+    params?: Record<string, string | number | boolean | undefined>,
+  ): string => {
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== "") {
+          searchParams.append(key, String(value));
+        }
+      });
+    }
+    const query = searchParams.toString();
+    return `${API_URL}/audit/export${query ? `?${query}` : ""}`;
+  },
+  getCertificateHistory: async (
+    certificateId: string,
+  ): Promise<ActivityItem[]> => {
+    return apiClient<ActivityItem[]>(`/audit/resource/${certificateId}`);
+  },
+};
+
+export const adminAnalyticsApi = {
+  getAnalytics: async (
+    params?: Record<string, string | number | boolean | undefined>,
+  ): Promise<AdminAnalytics> => {
+    if (USE_DUMMY_DATA) {
+      await simulateDelay();
+      return {
+        usersByRole: { users: 100, issuers: 24, admins: 4, total: 128 },
+        usersByStatus: {
+          active: 110,
+          inactive: 10,
+          suspended: 4,
+          pendingVerification: 4,
+        },
+        certificatesByStatus: {
+          active: 1200,
+          revoked: 30,
+          expired: 20,
+          total: 1250,
+        },
+        topIssuers: [
+          {
+            issuerId: "issuer-1",
+            issuerName: "StellarCert Academy",
+            certificateCount: 320,
+            percentage: 25.6,
+          },
+        ],
+        verificationTrends: {
+          total: 450,
+          successful: 430,
+          failed: 20,
+          successRate: 95.6,
+          last24Hours: 15,
+          last7Days: 82,
+          last30Days: 310,
+        },
+        userRegistrationTrend: [{ date: "2026-03-01", count: 8 }],
+        certificateIssuanceTrend: [{ date: "2026-03-01", count: 15 }],
+        totalIssuers: 24,
+      };
+    }
+
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== "") {
+          searchParams.append(key, String(value));
+        }
+      });
+    }
+    return apiClient<AdminAnalytics>(
+      `/admin/analytics${searchParams.toString() ? `?${searchParams.toString()}` : ""}`,
+    );
   },
 };

@@ -101,6 +101,15 @@ export class User {
   @Column({ type: 'timestamp', nullable: true })
   refreshTokenExpires: Date;
 
+  @Column({ default: false })
+  twoFactorEnabled: boolean;
+
+  @Column({ nullable: true, select: false })
+  twoFactorSecret: string | null;
+
+  @Column({ type: 'simple-array', nullable: true, select: false })
+  twoFactorBackupCodes: string[] | null;
+
   @CreateDateColumn()
   createdAt: Date;
 
